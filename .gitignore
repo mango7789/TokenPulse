@@ -1,0 +1,5 @@
+.build/
+.swiftpm/
+TokenPulse.app/
+.DS_Store
+*.xcuserstate
