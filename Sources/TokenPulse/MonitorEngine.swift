@@ -46,6 +46,7 @@ final class MonitorEngine: ObservableObject {
 
     private var seenAlerts = Set<AlertSignature>()
     private var previouslyRunningById: [String: ActiveSession] = [:]
+    private var unreadCompletedAt: [String: Date] = [:]
     private var hasCompletedInitialPoll = false
     private let codexCollector = CodexCollector()
     private let antigravityCollector = AntigravityCollector()
@@ -136,11 +137,13 @@ final class MonitorEngine: ObservableObject {
 
     func markCompletedAsRead(sessionId: String) {
         unreadCompletedSessions.removeAll { $0.id == sessionId }
+        unreadCompletedAt.removeValue(forKey: sessionId)
     }
 
     func markAllCompletedAsRead() {
         guard !unreadCompletedSessions.isEmpty else { return }
         unreadCompletedSessions.removeAll()
+        unreadCompletedAt.removeAll()
     }
 
     func markCompletedAsRead(forActivatedApp appName: String, bundleIdentifier: String?) {
@@ -150,14 +153,16 @@ final class MonitorEngine: ObservableObject {
         let isTerminal = ["terminal", "iterm", "warp", "ghostty", "alacritty", "kitty", "wezterm", "cursor"]
             .contains { lowerName.contains($0) || lowerBundle.contains($0) }
 
+        // Only auto-clear CLI/terminal sessions on app switch; Antigravity sessions use exact per-conversation lastViewedAt!
         unreadCompletedSessions.removeAll { session in
+            guard session.lastViewedAt == nil else { return false }
             switch session.sourceApp {
-            case "Antigravity":
-                return (lowerName.contains("antigravity") && !lowerName.contains("ide")) || lowerBundle.contains("antigravity")
-            case "Antigravity IDE":
-                return lowerName.contains("antigravity ide") || lowerName.contains("antigravity")
             case "Codex", "Claude Code", "Antigravity CLI":
-                return isTerminal
+                if isTerminal {
+                    unreadCompletedAt.removeValue(forKey: session.id)
+                    return true
+                }
+                return false
             default:
                 return false
             }
@@ -175,24 +180,41 @@ final class MonitorEngine: ObservableObject {
         }
 
         if hasCompletedInitialPoll {
+            let now = Date()
             // Any session that was running in the previous poll and is now idle -> newly completed!
             for (id, prev) in previouslyRunningById {
                 if let nowSession = sessionById[id] {
                     if case .idle = nowSession.state {
+                        let doneAt = max(nowSession.updatedAt, now.addingTimeInterval(-3))
+                        // Skip immediately if the user is already viewing this exact conversation right now
+                        if let viewed = nowSession.lastViewedAt, viewed >= doneAt {
+                            continue
+                        }
                         unreadCompletedSessions.removeAll { $0.id == id }
                         unreadCompletedSessions.insert(nowSession, at: 0)
+                        unreadCompletedAt[id] = doneAt
                     }
                 } else {
-                    // Session disappeared from active list after running
                     unreadCompletedSessions.removeAll { $0.id == id }
                     unreadCompletedSessions.insert(prev, at: 0)
+                    unreadCompletedAt[id] = now
                 }
             }
 
-            // If an unread session starts running again or needs action, remove it from completed-unread
-            unreadCompletedSessions.removeAll { unread in
-                guard let current = sessionById[unread.id] else { return false }
-                return current.state.isRunning || current.state.isNeedsAction
+            // Refresh metadata & auto-clear any specific conversation once viewed or resumed
+            unreadCompletedSessions = unreadCompletedSessions.compactMap { unread in
+                guard let current = sessionById[unread.id] else { return unread }
+                if current.state.isRunning || current.state.isNeedsAction {
+                    unreadCompletedAt.removeValue(forKey: unread.id)
+                    return nil
+                }
+                if let viewed = current.lastViewedAt,
+                   let doneAt = unreadCompletedAt[unread.id],
+                   viewed >= doneAt.addingTimeInterval(-1.0) {
+                    unreadCompletedAt.removeValue(forKey: unread.id)
+                    return nil
+                }
+                return current
             }
         }
 

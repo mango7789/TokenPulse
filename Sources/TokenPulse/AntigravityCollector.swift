@@ -103,6 +103,7 @@ final class AntigravityCollector: @unchecked Sendable {
 
                 // Only include sessions that either have tokens or are actively running/waiting
                 if (parsed?.totalTokens ?? 0) > 0 || state != .idle {
+                    let viewedAt = readLastUserViewTime(rootPath: source.rootPath, conversationId: cid)
                     allSessions.append(ActiveSession(
                         id: "\(source.sourceName)::\(cid)",
                         provider: .gemini,
@@ -112,7 +113,8 @@ final class AntigravityCollector: @unchecked Sendable {
                         state: state,
                         updatedAt: updatedAt,
                         totalTokens: parsed?.totalTokens ?? 0,
-                        latestTPS: parsed?.latestTPS
+                        latestTPS: parsed?.latestTPS,
+                        lastViewedAt: viewedAt
                     ))
                 }
             }
@@ -318,6 +320,23 @@ final class AntigravityCollector: @unchecked Sendable {
         }
 
         return .idle
+    }
+
+    /// Reads per-conversation `last_user_view_time:{seconds:...}` from annotations/<cid>.pbtxt.
+    private func readLastUserViewTime(rootPath: String, conversationId: String) -> Date? {
+        let path = (rootPath as NSString)
+            .appendingPathComponent("annotations")
+            .appending("/\(conversationId).pbtxt")
+        guard let text = try? String(contentsOfFile: path, encoding: .utf8),
+              let marker = text.range(of: "last_user_view_time") else {
+            return nil
+        }
+        let tail = text[marker.upperBound...]
+        guard let secRange = tail.range(of: "seconds:") else { return nil }
+        let afterSec = tail[secRange.upperBound...].drop(while: { $0 == " " })
+        let digits = afterSec.prefix(while: { $0.isNumber })
+        guard let secs = Double(digits), secs > 1_000_000_000 else { return nil }
+        return Date(timeIntervalSince1970: secs)
     }
 
     private func cleanTitle(_ raw: String) -> String {

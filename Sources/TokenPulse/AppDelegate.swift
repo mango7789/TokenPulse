@@ -121,10 +121,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func togglePopover(_ sender: AnyObject?) {
         if popover.isShown {
             popover.performClose(sender)
-            engine.markAllCompletedAsRead()
         } else if let win = fallbackWindow, win.isVisible {
             win.close()
-            engine.markAllCompletedAsRead()
         } else {
             showPanelSmart()
         }

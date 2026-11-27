@@ -80,6 +80,31 @@ struct ActiveSession: Identifiable, Sendable {
     let updatedAt: Date
     let totalTokens: Int
     let latestTPS: Double?
+    let lastViewedAt: Date?
+
+    init(
+        id: String,
+        provider: AIProvider,
+        sourceApp: String,
+        title: String,
+        model: String,
+        state: SessionActivityState,
+        updatedAt: Date,
+        totalTokens: Int,
+        latestTPS: Double?,
+        lastViewedAt: Date? = nil
+    ) {
+        self.id = id
+        self.provider = provider
+        self.sourceApp = sourceApp
+        self.title = title
+        self.model = model
+        self.state = state
+        self.updatedAt = updatedAt
+        self.totalTokens = totalTokens
+        self.latestTPS = latestTPS
+        self.lastViewedAt = lastViewedAt
+    }
 }
 
 struct ModelAggregate: Identifiable, Sendable {
