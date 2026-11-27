@@ -56,11 +56,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil
         )
 
+        // Automatically clear completed-unread reminders when user switches back to the source app
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(handleWorkspaceAppActivated(_:)),
+            name: NSWorkspace.didActivateApplicationNotification,
+            object: nil
+        )
+
         // Observe state changes to update the menu bar icon immediately
         engine.$allSessions
-            .combineLatest(engine.$allRecords, engine.$menuBarDisplayMode)
+            .combineLatest(engine.$allRecords, engine.$menuBarDisplayMode, engine.$unreadCompletedSessions)
             .receive(on: RunLoop.main)
-            .sink { [weak self] _, _, _ in
+            .sink { [weak self] _, _, _, _ in
                 self?.updateStatusItemAppearance()
             }
             .store(in: &cancellables)
@@ -71,8 +79,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self else { return }
                 switch self.engine.overallState {
                 case .idle:
-                    // Gentle, calm sleeping-Mac breathing pulse (~0.36 Hz, ~2.8s per breath)
-                    self.pulsePhase = (self.pulsePhase + dt * 0.36).truncatingRemainder(dividingBy: 1.0)
+                    // Slightly livelier gentle breath when completed-unread, calm breath when pure idle
+                    let hz = self.engine.unreadCompletedSessions.isEmpty ? 0.36 : 0.50
+                    self.pulsePhase = (self.pulsePhase + dt * hz).truncatingRemainder(dividingBy: 1.0)
                     self.updateStatusItemAppearance()
                 case .running:
                     // Scale sweep frequency smoothly with live unfiltered TPS (10..180 t/s -> 0.42..1.75 Hz)
@@ -101,11 +110,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         showPanelSmart()
     }
 
+    @objc private func handleWorkspaceAppActivated(_ notification: Notification) {
+        guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else {
+            return
+        }
+        let name = app.localizedName ?? ""
+        engine.markCompletedAsRead(forActivatedApp: name, bundleIdentifier: app.bundleIdentifier)
+    }
+
     @objc private func togglePopover(_ sender: AnyObject?) {
         if popover.isShown {
             popover.performClose(sender)
+            engine.markAllCompletedAsRead()
         } else if let win = fallbackWindow, win.isVisible {
             win.close()
+            engine.markAllCompletedAsRead()
         } else {
             showPanelSmart()
         }
@@ -198,6 +217,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let pendingCount = engine.activeNeedsActionSessions.count
         let runningSessions = engine.activeRunningSessions
         let runningCount = runningSessions.count
+        let completedCount = engine.unreadCompletedSessions.count
         let displayMode = engine.menuBarDisplayMode
         let isDark = button.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
 
@@ -211,6 +231,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let runningColors = activeProviders.map { providerAccentColor($0, isDark: isDark) }
         let runningTextAccent = interpolateColor(runningColors, t: 0.5)
         let pendingAccent = NSColor(calibratedRed: 0.96, green: 0.44, blue: 0.09, alpha: 1.0)
+        // Fresh mint-teal accent for "completed, ready to review"
+        let completedAccent: NSColor = isDark
+            ? NSColor(calibratedRed: 0.18, green: 0.83, blue: 0.75, alpha: 1.0)
+            : NSColor(calibratedRed: 0.05, green: 0.58, blue: 0.53, alpha: 1.0)
 
         button.imagePosition = .imageOnly
         button.title = ""
@@ -253,6 +277,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             statusItem.length = img.size.width
             let names = activeProviders.map(\.shortName).joined(separator: " + ")
             button.toolTip = "TokenPulse：\(names) 运行中（\(Formatters.tps(engine.liveLatestTPS)) · 近 1 天 \(costText)）"
+        } else if completedCount > 0 {
+            let badgeText: String? = {
+                switch displayMode {
+                case .iconOnly: return nil
+                case .tps: return "\(completedCount)"
+                case .cost: return costText
+                }
+            }()
+            let img = drawPulseIcon(
+                mode: .completed(phase: pulsePhase, color: completedAccent),
+                badgeText: badgeText,
+                badgeColor: completedAccent,
+                appearance: button.effectiveAppearance
+            )
+            button.image = img
+            statusItem.length = img.size.width
+            button.toolTip = "TokenPulse：有 \(completedCount) 个对话已跑完，等待查看（切回应用或查看后自动消除）"
         } else {
             let badgeText: String? = {
                 switch displayMode {
@@ -277,6 +318,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private enum StatusIconMode {
         case idle(phase: Double)
         case running(phase: Double, colors: [NSColor])
+        case completed(phase: Double, color: NSColor)
         case needsAction(phase: Double)
     }
 
@@ -432,6 +474,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     (palette.last ?? palette[0]).setFill()
                     NSBezierPath(ovalIn: NSRect(x: hp.x - r, y: hp.y - r, width: r * 2, height: r * 2)).fill()
                 }
+                drawBadgeIfNeeded(color: badgeColor)
+                return true
+            }
+            img.isTemplate = false
+            return img
+
+        case .completed(let phase, let color):
+            let alpha = 0.55 + 0.45 * (0.5 + 0.5 * sin(CGFloat(phase) * .pi * 2.0))
+            let img = NSImage(size: size, flipped: false) { _ in
+                color.withAlphaComponent(alpha).setStroke()
+                makeFullPath().stroke()
                 drawBadgeIfNeeded(color: badgeColor)
                 return true
             }

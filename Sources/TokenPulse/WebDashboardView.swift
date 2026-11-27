@@ -85,6 +85,15 @@ final class WebDashboardViewController: NSViewController, WKScriptMessageHandler
                 engine.dismissAlert(for: session)
                 pushState()
             }
+        case "dismissCompleted":
+            if let id = body["value"] as? String {
+                if id == "__all__" {
+                    engine.markAllCompletedAsRead()
+                } else {
+                    engine.markCompletedAsRead(sessionId: id)
+                }
+                pushState()
+            }
         case "setMenuBarMode":
             if let v = body["value"] as? String, let mode = MenuBarDisplayMode(rawValue: v) {
                 engine.menuBarDisplayMode = mode
@@ -219,12 +228,16 @@ final class WebDashboardViewController: NSViewController, WKScriptMessageHandler
         let statusText: String
         let pendingCount = engine.activeNeedsActionSessions.count
         let runningCount = engine.activeRunningSessions.count
+        let completedCount = engine.unreadCompletedSessions.count
         if pendingCount > 0 {
             overall = "needsAction"
             statusText = "待操作 \(pendingCount)"
         } else if runningCount > 0 {
             overall = "running"
             statusText = "运行中 \(runningCount)"
+        } else if completedCount > 0 {
+            overall = "completed"
+            statusText = "已完成 \(completedCount)"
         } else {
             overall = "idle"
             statusText = "空闲"
@@ -289,6 +302,16 @@ final class WebDashboardViewController: NSViewController, WKScriptMessageHandler
                 "sourceApp": s.sourceApp,
                 "title": s.title,
                 "reason": s.state.label
+            ]
+        }
+
+        let completedPayload: [[String: Any]] = engine.unreadCompletedSessions.map { s in
+            [
+                "id": s.id,
+                "provider": s.provider.shortName,
+                "sourceApp": s.sourceApp,
+                "title": s.title,
+                "updatedAt": Formatters.relativeTime(s.updatedAt)
             ]
         }
 
@@ -427,6 +450,7 @@ final class WebDashboardViewController: NSViewController, WKScriptMessageHandler
             "timeRange": timeRangeKey,
             "providerFilter": providerKey,
             "alerts": alertsPayload,
+            "completedAlerts": completedPayload,
             "totalTokens": Formatters.tokens(engine.totalTokens),
             "requestCount": records.count,
             "estimatedCostUSD": pricing.estimatedCostUSD,

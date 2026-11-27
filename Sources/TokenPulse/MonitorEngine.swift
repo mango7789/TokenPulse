@@ -36,6 +36,8 @@ final class MonitorEngine: ObservableObject {
     /// Dismissed alert signatures (sessionId -> updatedAt timestamp) so a dismissed alert
     /// stays quiet until the session updates again.
     @Published private var dismissedAlerts: [String: Date] = [:]
+    /// Sessions that transitioned from running -> idle and haven't been viewed yet.
+    @Published private(set) var unreadCompletedSessions: [ActiveSession] = []
 
     private struct AlertSignature: Hashable {
         let sessionId: String
@@ -43,6 +45,8 @@ final class MonitorEngine: ObservableObject {
     }
 
     private var seenAlerts = Set<AlertSignature>()
+    private var previouslyRunningById: [String: ActiveSession] = [:]
+    private var hasCompletedInitialPoll = false
     private let codexCollector = CodexCollector()
     private let antigravityCollector = AntigravityCollector()
     private let claudeCollector = ClaudeCollector()
@@ -95,6 +99,8 @@ final class MonitorEngine: ObservableObject {
                 self.allRecords = mergedRecords
                 self.allSessions = mergedSessions
                 self.playSoundForNewAlerts()
+                self.updateUnreadCompletedSessions(from: mergedSessions)
+                self.hasCompletedInitialPoll = true
                 self.codexQuota = codexSnap.codexQuota
                 self.lastUpdated = Date()
                 self.isRefreshing = false
@@ -126,6 +132,71 @@ final class MonitorEngine: ObservableObject {
 
     func dismissAlert(for session: ActiveSession) {
         dismissedAlerts[session.id] = session.updatedAt
+    }
+
+    func markCompletedAsRead(sessionId: String) {
+        unreadCompletedSessions.removeAll { $0.id == sessionId }
+    }
+
+    func markAllCompletedAsRead() {
+        guard !unreadCompletedSessions.isEmpty else { return }
+        unreadCompletedSessions.removeAll()
+    }
+
+    func markCompletedAsRead(forActivatedApp appName: String, bundleIdentifier: String?) {
+        guard !unreadCompletedSessions.isEmpty else { return }
+        let lowerName = appName.lowercased()
+        let lowerBundle = (bundleIdentifier ?? "").lowercased()
+        let isTerminal = ["terminal", "iterm", "warp", "ghostty", "alacritty", "kitty", "wezterm", "cursor"]
+            .contains { lowerName.contains($0) || lowerBundle.contains($0) }
+
+        unreadCompletedSessions.removeAll { session in
+            switch session.sourceApp {
+            case "Antigravity":
+                return (lowerName.contains("antigravity") && !lowerName.contains("ide")) || lowerBundle.contains("antigravity")
+            case "Antigravity IDE":
+                return lowerName.contains("antigravity ide") || lowerName.contains("antigravity")
+            case "Codex", "Claude Code", "Antigravity CLI":
+                return isTerminal
+            default:
+                return false
+            }
+        }
+    }
+
+    private func updateUnreadCompletedSessions(from sessions: [ActiveSession]) {
+        var currentRunning: [String: ActiveSession] = [:]
+        var sessionById: [String: ActiveSession] = [:]
+        for s in sessions {
+            sessionById[s.id] = s
+            if s.state.isRunning {
+                currentRunning[s.id] = s
+            }
+        }
+
+        if hasCompletedInitialPoll {
+            // Any session that was running in the previous poll and is now idle -> newly completed!
+            for (id, prev) in previouslyRunningById {
+                if let nowSession = sessionById[id] {
+                    if case .idle = nowSession.state {
+                        unreadCompletedSessions.removeAll { $0.id == id }
+                        unreadCompletedSessions.insert(nowSession, at: 0)
+                    }
+                } else {
+                    // Session disappeared from active list after running
+                    unreadCompletedSessions.removeAll { $0.id == id }
+                    unreadCompletedSessions.insert(prev, at: 0)
+                }
+            }
+
+            // If an unread session starts running again or needs action, remove it from completed-unread
+            unreadCompletedSessions.removeAll { unread in
+                guard let current = sessionById[unread.id] else { return false }
+                return current.state.isRunning || current.state.isNeedsAction
+            }
+        }
+
+        previouslyRunningById = currentRunning
     }
 
     // MARK: - Derived State

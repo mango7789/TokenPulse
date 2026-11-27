@@ -128,6 +128,12 @@ enum DashboardHTML {
     border-color: rgba(14, 165, 233, 0.28);
   }
 
+  .status-pill.completed {
+    background: rgba(13, 148, 136, 0.12);
+    color: #0d9488;
+    border-color: rgba(13, 148, 136, 0.30);
+  }
+
   .status-pill.needs-action {
     background: rgba(245, 158, 11, 0.14);
     color: #d97706;
@@ -318,6 +324,37 @@ enum DashboardHTML {
   .dismiss-btn:hover {
     background: var(--surface-2);
     color: var(--text);
+  }
+
+  .completed-card {
+    background: linear-gradient(135deg, #f0fdfa, #ccfbf1);
+    border: 1px solid rgba(13, 148, 136, 0.30);
+    border-radius: var(--radius);
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    box-shadow: var(--shadow-sm);
+  }
+
+  .completed-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 12px;
+    font-weight: 600;
+    color: #0f766e;
+  }
+
+  .completed-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    background: #ffffff;
+    border: 1px solid rgba(13, 148, 136, 0.18);
+    border-radius: 9px;
+    padding: 8px 10px;
   }
 
   /* Hero KPI Cards */
@@ -876,6 +913,7 @@ enum DashboardHTML {
 
   <div class="content">
     <div id="alert-box" class="alert-card" style="display:none;"></div>
+    <div id="completed-box" class="completed-card" style="display:none;"></div>
 
     <div class="hero-grid">
       <div class="card">
@@ -985,8 +1023,18 @@ enum DashboardHTML {
       postMsg('dismissAlert', dismiss.dataset.dismissAlert);
       return;
     }
+    const dismissDone = event.target.closest('[data-dismiss-completed]');
+    if (dismissDone) {
+      postMsg('dismissCompleted', dismissDone.dataset.dismissCompleted);
+      return;
+    }
     const row = event.target.closest('[data-focus-app]');
-    if (row) postMsg('focusApp', row.dataset.focusApp);
+    if (row) {
+      if (row.dataset.completedId) {
+        postMsg('dismissCompleted', row.dataset.completedId);
+      }
+      postMsg('focusApp', row.dataset.focusApp);
+    }
   });
 
   document.addEventListener('keydown', event => {
@@ -1233,7 +1281,10 @@ enum DashboardHTML {
 
     const pill = document.getElementById('status-pill');
     const dot = pill.querySelector('.dot');
-    pill.className = 'status-pill ' + (d.overallState === 'needsAction' ? 'needs-action' : (d.overallState === 'running' ? 'running' : ''));
+    const pillCls = d.overallState === 'needsAction' ? 'needs-action'
+      : (d.overallState === 'running' ? 'running'
+      : (d.overallState === 'completed' ? 'completed' : ''));
+    pill.className = 'status-pill ' + pillCls;
     dot.className = 'dot ' + (d.overallState !== 'idle' ? 'pulse' : '');
     document.getElementById('status-text').textContent = d.statusText;
 
@@ -1260,6 +1311,28 @@ enum DashboardHTML {
       `).join('');
     } else {
       alertBox.style.display = 'none';
+    }
+
+    const completedBox = document.getElementById('completed-box');
+    if (d.completedAlerts && d.completedAlerts.length > 0) {
+      completedBox.style.display = 'flex';
+      completedBox.innerHTML = `
+        <div class="completed-header">
+          <span>已完成，等待查看</span>
+          <button class="dismiss-btn" data-dismiss-completed="__all__">全部已读</button>
+        </div>
+      ` + d.completedAlerts.map(c => `
+        <div class="completed-item" data-focus-app="${esc(c.sourceApp)}" data-completed-id="${esc(c.id)}" title="切换到 ${esc(c.sourceApp)} 并标记已读">
+          <span class="badge ${c.provider.toLowerCase()}">${esc(c.provider)}</span>
+          <div class="alert-meta" role="button" tabindex="0">
+            <div class="alert-title">${esc(c.title)}</div>
+            <div class="alert-sub">${esc(c.sourceApp)} · 刚完成（${esc(c.updatedAt)}）</div>
+          </div>
+          <button class="dismiss-btn" data-dismiss-completed="${esc(c.id)}">已读</button>
+        </div>
+      `).join('');
+    } else {
+      completedBox.style.display = 'none';
     }
 
     document.getElementById('total-tokens').textContent = d.totalTokens;
