@@ -13,6 +13,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var cancellables = Set<AnyCancellable>()
     private var animationTimer: Timer?
     private var pulsePhase: Double = 0.0
+    private var lastAppliedLength: CGFloat = -1
+    private var tickCounter: Int = 0
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Single-instance guard: if already running, ask the existing instance to show its panel and exit.
@@ -73,31 +75,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             .store(in: &cancellables)
 
-        let dt = 0.05
+        let dt = 0.08
         animationTimer = Timer.scheduledTimer(withTimeInterval: dt, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
+                self.tickCounter &+= 1
                 switch self.engine.overallState {
                 case .idle:
-                    // Slightly livelier gentle breath when completed-unread, calm breath when pure idle
+                    // Update every other tick (~6.25 fps) for ultra-low CPU gentle breathing
+                    guard self.tickCounter.isMultiple(of: 2) else { return }
                     let hz = self.engine.unreadCompletedSessions.isEmpty ? 0.36 : 0.50
-                    self.pulsePhase = (self.pulsePhase + dt * hz).truncatingRemainder(dividingBy: 1.0)
+                    self.pulsePhase = (self.pulsePhase + (dt * 2.0) * hz).truncatingRemainder(dividingBy: 1.0)
                     self.updateStatusItemAppearance()
                 case .running:
-                    // Scale sweep frequency smoothly with live unfiltered TPS (10..180 t/s -> 0.42..1.75 Hz)
+                    // Smooth ~12.5 fps sweep scaled with live TPS
                     let tps = self.engine.liveLatestTPS ?? 45.0
                     let clamped = max(10.0, min(180.0, tps))
                     let hz = 0.42 + (clamped - 10.0) / 170.0 * 1.33
                     self.pulsePhase = (self.pulsePhase + dt * hz).truncatingRemainder(dividingBy: 1.0)
                     self.updateStatusItemAppearance()
                 case .needsAction:
-                    // Gentle 0.55 Hz breathing cadence
-                    self.pulsePhase = (self.pulsePhase + dt * 0.55).truncatingRemainder(dividingBy: 1.0)
+                    guard self.tickCounter.isMultiple(of: 2) else { return }
+                    self.pulsePhase = (self.pulsePhase + (dt * 2.0) * 0.55).truncatingRemainder(dividingBy: 1.0)
                     self.updateStatusItemAppearance()
                 }
             }
         }
 
+        animationTimer?.tolerance = 0.03
         updateStatusItemAppearance()
     }
 
@@ -209,6 +214,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
     }
 
+    private func applyStatusImage(_ img: NSImage, tooltip: String) {
+        guard let button = statusItem.button else { return }
+        button.image = img
+        if abs(lastAppliedLength - img.size.width) > 0.1 {
+            statusItem.length = img.size.width
+            lastAppliedLength = img.size.width
+        }
+        if button.toolTip != tooltip {
+            button.toolTip = tooltip
+        }
+    }
+
     private func updateStatusItemAppearance() {
         guard let button = statusItem.button else { return }
 
@@ -234,9 +251,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ? NSColor(calibratedRed: 0.18, green: 0.83, blue: 0.75, alpha: 1.0)
             : NSColor(calibratedRed: 0.05, green: 0.58, blue: 0.53, alpha: 1.0)
 
-        button.imagePosition = .imageOnly
-        button.title = ""
-
         let costText = String(format: "$%.2f", engine.last24hEstimatedCostUSD)
 
         if pendingCount > 0 {
@@ -253,9 +267,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 badgeColor: pendingAccent,
                 appearance: button.effectiveAppearance
             )
-            button.image = img
-            statusItem.length = img.size.width
-            button.toolTip = "TokenPulse：有 \(pendingCount) 个会话正在等待你操作（近 1 天 \(costText)）"
+            applyStatusImage(img, tooltip: "TokenPulse：有 \(pendingCount) 个会话正在等待你操作（近 1 天 \(costText)）")
         } else if runningCount > 0 {
             let tpsLabel = engine.liveLatestTPS.map { "\(Int(round($0)))" } ?? "\(runningCount)"
             let badgeText: String? = {
@@ -271,10 +283,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 badgeColor: runningTextAccent,
                 appearance: button.effectiveAppearance
             )
-            button.image = img
-            statusItem.length = img.size.width
             let names = activeProviders.map(\.shortName).joined(separator: " + ")
-            button.toolTip = "TokenPulse：\(names) 运行中（\(Formatters.tps(engine.liveLatestTPS)) · 近 1 天 \(costText)）"
+            applyStatusImage(img, tooltip: "TokenPulse：\(names) 运行中（\(Formatters.tps(engine.liveLatestTPS)) · 近 1 天 \(costText)）")
         } else if completedCount > 0 {
             let badgeText: String? = {
                 switch displayMode {
@@ -289,9 +299,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 badgeColor: completedAccent,
                 appearance: button.effectiveAppearance
             )
-            button.image = img
-            statusItem.length = img.size.width
-            button.toolTip = "TokenPulse：有 \(completedCount) 个对话已跑完，等待查看（切回应用或查看后自动消除）"
+            applyStatusImage(img, tooltip: "TokenPulse：有 \(completedCount) 个对话已跑完，等待查看（查看后自动消除）")
         } else {
             let badgeText: String? = {
                 switch displayMode {
@@ -307,9 +315,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 badgeColor: idleInk,
                 appearance: button.effectiveAppearance
             )
-            button.image = img
-            statusItem.length = img.size.width
-            button.toolTip = "TokenPulse（空闲 · 近 1 天 \(costText) · \(Formatters.tokens(engine.todayTotalTokens)) tokens）"
+            applyStatusImage(img, tooltip: "TokenPulse（空闲 · 近 1 天 \(costText) · \(Formatters.tokens(engine.todayTotalTokens)) tokens）")
         }
     }
 

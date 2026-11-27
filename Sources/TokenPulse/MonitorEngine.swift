@@ -44,6 +44,11 @@ final class MonitorEngine: ObservableObject {
         let updatedAt: Date
     }
 
+    /// Cached O(1) values updated once per 2s poll so menu bar animation frames never scan allRecords.
+    @Published private(set) var cached24hTokens: Int = 0
+    @Published private(set) var cached24hCostUSD: Double = 0.0
+    @Published private(set) var cachedLiveLatestTPS: Double? = nil
+
     private var seenAlerts = Set<AlertSignature>()
     private var previouslyRunningById: [String: ActiveSession] = [:]
     private var unreadCompletedAt: [String: Date] = [:]
@@ -60,11 +65,13 @@ final class MonitorEngine: ObservableObject {
 
     func startPolling() {
         timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+        let t = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.refresh()
             }
         }
+        t.tolerance = 0.5
+        timer = t
     }
 
     func stopPolling() {
@@ -99,6 +106,7 @@ final class MonitorEngine: ObservableObject {
                 guard let self else { return }
                 self.allRecords = mergedRecords
                 self.allSessions = mergedSessions
+                self.recomputeMenuBarCaches()
                 self.playSoundForNewAlerts()
                 self.updateUnreadCompletedSessions(from: mergedSessions)
                 self.hasCompletedInitialPoll = true
@@ -281,19 +289,25 @@ final class MonitorEngine: ObservableObject {
         totalInputTokens + totalOutputTokens
     }
 
-    /// Always computes rolling 24h total tokens (across all providers) for the menu bar tooltip.
-    var todayTotalTokens: Int {
-        let start = Date().addingTimeInterval(-24 * 3600)
-        return allRecords
-            .filter { $0.timestamp >= start }
-            .reduce(0) { $0 + $1.totalTokens }
-    }
+    /// Always computes rolling 24h total tokens (cached per 2s poll).
+    var todayTotalTokens: Int { cached24hTokens }
 
-    /// Always computes rolling 24h equivalent API cost in USD for the menu bar readout.
-    var last24hEstimatedCostUSD: Double {
-        let start = Date().addingTimeInterval(-24 * 3600)
-        let recent = allRecords.filter { $0.timestamp >= start }
-        return Pricing.estimate(recent).estimatedCostUSD
+    /// Always computes rolling 24h equivalent API cost in USD (cached per 2s poll).
+    var last24hEstimatedCostUSD: Double { cached24hCostUSD }
+
+    /// Unfiltered latest TPS (cached per 2s poll).
+    var liveLatestTPS: Double? { cachedLiveLatestTPS }
+
+    private func recomputeMenuBarCaches() {
+        let cutoff = Date().addingTimeInterval(-24 * 3600)
+        let recent = allRecords.filter { $0.timestamp >= cutoff }
+        cached24hTokens = recent.reduce(0) { $0 + $1.totalTokens }
+        cached24hCostUSD = Pricing.estimate(recent).estimatedCostUSD
+        if let activeTps = activeRunningSessions.compactMap(\.latestTPS).first {
+            cachedLiveLatestTPS = activeTps
+        } else {
+            cachedLiveLatestTPS = allRecords.first(where: { $0.tps != nil })?.tps
+        }
     }
 
     var antigravityRecent5hTokens: Int {
@@ -318,14 +332,6 @@ final class MonitorEngine: ObservableObject {
 
     var latestTPS: Double? {
         filteredRecords.first(where: { $0.tps != nil })?.tps
-    }
-
-    /// Unfiltered latest TPS (prioritizing currently running sessions) for the menu bar & pulse speed.
-    var liveLatestTPS: Double? {
-        if let activeTps = activeRunningSessions.compactMap(\.latestTPS).first {
-            return activeTps
-        }
-        return allRecords.first(where: { $0.tps != nil })?.tps
     }
 
     var gptTokensInRange: Int {

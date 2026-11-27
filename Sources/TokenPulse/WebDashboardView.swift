@@ -221,8 +221,13 @@ final class WebDashboardViewController: NSViewController, WKScriptMessageHandler
         }
     }
 
+    override func viewWillAppear() {
+        super.viewWillAppear()
+        pushState()
+    }
+
     func pushState() {
-        guard isLoaded else { return }
+        guard isLoaded, view.window?.isVisible == true else { return }
 
         let overall: String
         let statusText: String
